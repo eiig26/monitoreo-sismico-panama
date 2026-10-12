@@ -8,7 +8,8 @@ URL = "https://sismosgeociencias.up.ac.pa/"
 def obtener_sismos():
     response = requests.get(URL, timeout=30)
     response.raise_for_status()
-
+    response.encoding = "utf-8"
+    
     soup = BeautifulSoup(response.text, "html.parser")
 
     # El HTML incluye tablas para distintos tamaños de pantalla.
