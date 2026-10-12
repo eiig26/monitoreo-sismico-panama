@@ -181,6 +181,20 @@ def sincronizar():
     token = obtener_token()
     sismos = obtener_sismos()
 
+    from collections import defaultdict
+    
+    grupos = defaultdict(list)
+    
+    for sismo in sismos:
+        grupos[generar_id(sismo)].append(sismo)
+    
+    for identificador, registros in grupos.items():
+        if len(registros) > 1:
+            print("IDENTIFICADOR REPETIDO:", identificador)
+            for registro in registros:
+                print(json.dumps(registro, ensure_ascii=False))
+
+
     if not sismos:
         raise RuntimeError("La fuente no devolvió sismos.")
 
