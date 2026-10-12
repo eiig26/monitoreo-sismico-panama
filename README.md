@@ -1,0 +1,1 @@
+# monitoreo-sismico-panama
