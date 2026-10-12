@@ -181,18 +181,39 @@ def sincronizar():
     token = obtener_token()
     sismos = obtener_sismos()
 
-    from collections import defaultdict
-    
-    grupos = defaultdict(list)
-    
-    for sismo in sismos:
-        grupos[generar_id(sismo)].append(sismo)
-    
-    for identificador, registros in grupos.items():
-        if len(registros) > 1:
-            print("IDENTIFICADOR REPETIDO:", identificador)
-            for registro in registros:
-                print(json.dumps(registro, ensure_ascii=False))
+
+from collections import defaultdict
+
+grupos = defaultdict(list)
+
+for sismo in sismos:
+    clave = f"{sismo['fecha']}|{sismo['hora']}"
+    grupos[clave].append(sismo)
+
+repetidos = {
+    clave: registros
+    for clave, registros in grupos.items()
+    if len(registros) > 1
+}
+
+print("=== DIAGNOSTICO DE DUPLICADOS ===")
+print("Total registros:", len(sismos))
+print("Fechas y horas únicas:", len(grupos))
+print("Grupos con repetidos:", len(repetidos))
+
+for clave, registros in list(repetidos.items())[:3]:
+    print("Fecha y hora:", clave)
+
+    for registro in registros[:3]:
+        print(
+            "Latitud:", registro["latitud"],
+            "Longitud:", registro["longitud"],
+            "Magnitud:", registro["magnitud"],
+            "Estado:", registro["estado"]
+        )
+
+print("=== FIN DEL DIAGNOSTICO ===")
+
 
 
     if not sismos:
