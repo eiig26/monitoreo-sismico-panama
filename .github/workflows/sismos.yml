@@ -34,3 +34,11 @@ jobs:
           ARCGIS_CLIENT_SECRET: ${{ secrets.ARCGIS_CLIENT_SECRET }}
         run: python test_arcgis.py
 
+        
+      - name: Sincronizar 5 sismos con ArcGIS Online
+        env:
+          ARCGIS_CLIENT_ID: ${{ secrets.ARCGIS_CLIENT_ID }}
+          ARCGIS_CLIENT_SECRET: ${{ secrets.ARCGIS_CLIENT_SECRET }}
+        run: python sync_sismos.py
+
+
