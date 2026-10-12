@@ -16,12 +16,15 @@ URL = (
 CLIENT_ID = os.environ["ARCGIS_CLIENT_ID"]
 CLIENT_SECRET = os.environ["ARCGIS_CLIENT_SECRET"]
 
-# Primera prueba: máximo 5 sismos
-LIMITE = 5
+LOTE = 100
+CAMPOS_COMPARAR = [
+    "estado", "magnitud", "profundidad_km",
+    "region", "latitud", "longitud"
+]
 
 
 def peticion(url, datos):
-    respuesta = requests.post(url, data=datos, timeout=30)
+    respuesta = requests.post(url, data=datos, timeout=60)
     respuesta.raise_for_status()
     resultado = respuesta.json()
 
@@ -44,25 +47,25 @@ def obtener_token():
     return resultado["access_token"]
 
 
-def id_temporal(sismo):
-    # ID provisional basado en fecha y hora local
+def generar_id(sismo):
     clave = f"{sismo['fecha']}|{sismo['hora']}"
-    return hashlib.sha256(clave.encode()).hexdigest()[:32]
+    return hashlib.sha256(
+        clave.encode("utf-8")
+    ).hexdigest()[:32]
 
 
 def preparar_entidad(sismo):
-    fecha_texto = f"{sismo['fecha']} {sismo['hora']}"
-
-    fecha_local = datetime.strptime(
-        fecha_texto, "%Y-%m-%d %I:%M:%S%p"
+    fecha = datetime.strptime(
+        f"{sismo['fecha']} {sismo['hora']}",
+        "%Y-%m-%d %I:%M:%S%p"
     ).replace(tzinfo=ZoneInfo("America/Panama"))
 
-    fecha_ms = int(fecha_local.timestamp() * 1000)
+    fecha_ms = int(fecha.timestamp() * 1000)
     ahora_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
 
     return {
         "attributes": {
-            "id_evento": id_temporal(sismo),
+            "id_evento": generar_id(sismo),
             "fecha_hora": fecha_ms,
             "fecha_local": sismo["fecha"],
             "hora_local": sismo["hora"],
@@ -82,81 +85,179 @@ def preparar_entidad(sismo):
     }
 
 
-def sincronizar():
-    print("Iniciando prueba de sincronización...")
+def consultar_existentes(token, ids):
+    existentes = {}
 
-    token = obtener_token()
-    sismos = obtener_sismos()[:LIMITE]
+    for inicio in range(0, len(ids), LOTE):
+        bloque = ids[inicio:inicio + LOTE]
+        valores = ",".join(f"'{x}'" for x in bloque)
 
-    # Comprobar estructura de la capa
-    capa = peticion(URL, {"f": "json", "token": token})
-
-    campos = {campo["name"] for campo in capa["fields"]}
-
-    entidades = [preparar_entidad(s) for s in sismos]
-
-    requeridos = set(entidades[0]["attributes"])
-    faltantes = requeridos - campos
-
-    if faltantes:
-        raise RuntimeError(
-            f"Faltan campos en ArcGIS: {sorted(faltantes)}"
+        resultado = peticion(
+            f"{URL}/query",
+            {
+                "where": f"id_evento IN ({valores})",
+                "outFields": "*",
+                "returnGeometry": "false",
+                "f": "json",
+                "token": token
+            }
         )
 
-    # Consultar si los eventos ya existen
-    ids = [e["attributes"]["id_evento"] for e in entidades]
-    lista_ids = ",".join(f"'{valor}'" for valor in ids)
+        for entidad in resultado.get("features", []):
+            atributos = entidad["attributes"]
+            identificador = atributos["id_evento"]
 
-    resultado = peticion(
-        f"{URL}/query",
-        {
-            "where": f"id_evento IN ({lista_ids})",
-            "outFields": "id_evento",
-            "returnGeometry": "false",
+            if identificador in existentes:
+                raise RuntimeError(
+                    f"ID duplicado en ArcGIS: {identificador}"
+                )
+
+            existentes[identificador] = atributos
+
+    return existentes
+
+
+def hay_cambios(nuevo, anterior):
+    for campo in CAMPOS_COMPARAR:
+        a = nuevo[campo]
+        b = anterior.get(campo)
+
+        if isinstance(a, (float, int)):
+            if b is None or abs(float(a) - float(b)) > 0.000001:
+                return True
+        elif a != b:
+            return True
+
+    return False
+
+
+def aplicar_lotes(token, entidades, tipo):
+    total = 0
+
+    for inicio in range(0, len(entidades), LOTE):
+        bloque = entidades[inicio:inicio + LOTE]
+
+        parametros = {
             "f": "json",
-            "token": token
+            "token": token,
+            "rollbackOnFailure": "true",
+            tipo: json.dumps(bloque, ensure_ascii=False)
         }
+
+        resultado = peticion(
+            f"{URL}/applyEdits",
+            parametros
+        )
+
+        campo_resultado = (
+            "addResults" if tipo == "adds"
+            else "updateResults"
+        )
+
+        resultados = resultado.get(campo_resultado)
+
+        if resultados is None or len(resultados) != len(bloque):
+            raise RuntimeError(
+                f"Respuesta incompleta al ejecutar {tipo}"
+            )
+
+        errores = [
+            r for r in resultados if not r.get("success")
+        ]
+
+        if errores:
+            raise RuntimeError(
+                f"Fallaron operaciones {tipo}: {errores}"
+            )
+
+        total += len(resultados)
+
+    return total
+
+
+def sincronizar():
+    print("=== MONITOREO SISMICO DE PANAMA ===")
+
+    token = obtener_token()
+    sismos = obtener_sismos()
+
+    if not sismos:
+        raise RuntimeError("La fuente no devolvió sismos.")
+
+    capa = peticion(URL, {"f": "json", "token": token})
+
+    campos = {c["name"] for c in capa["fields"]}
+    id_objectid = capa["objectIdField"]
+
+    entidades = {}
+
+    for sismo in sismos:
+        entidad = preparar_entidad(sismo)
+        identificador = entidad["attributes"]["id_evento"]
+
+        if identificador in entidades:
+            if entidad["attributes"] != entidades[identificador]["attributes"]:
+                # fecha_actualizacion varía, por eso
+                # la excluimos de esta comparación
+                actual = entidad["attributes"].copy()
+                previo = entidades[identificador]["attributes"].copy()
+                actual.pop("fecha_actualizacion", None)
+                previo.pop("fecha_actualizacion", None)
+
+                if actual != previo:
+                    raise RuntimeError(
+                        f"Registros distintos con mismo ID: {identificador}"
+                    )
+
+        entidades[identificador] = entidad
+
+    requeridos = set(
+        next(iter(entidades.values()))["attributes"]
     )
 
-    existentes = {
-        f["attributes"]["id_evento"]
-        for f in resultado["features"]
-    }
+    if requeridos - campos:
+        raise RuntimeError(
+            f"Faltan campos: {sorted(requeridos - campos)}"
+        )
 
-    nuevos = [
-        e for e in entidades
-        if e["attributes"]["id_evento"] not in existentes
-    ]
+    if not {"Create", "Update"}.issubset(
+        set(capa.get("capabilities", "").split(","))
+    ):
+        raise RuntimeError(
+            "La capa debe permitir Create y Update."
+        )
 
-    print("Eventos examinados:", len(entidades))
-    print("Eventos ya existentes:", len(entidades) - len(nuevos))
-    print("Eventos nuevos:", len(nuevos))
-
-    if not nuevos:
-        print("No hay nuevos eventos para insertar.")
-        return
-
-    resultado = peticion(
-        f"{URL}/addFeatures",
-        {
-            "features": json.dumps(nuevos, ensure_ascii=False),
-            "f": "json",
-            "token": token
-        }
+    existentes = consultar_existentes(
+        token, list(entidades.keys())
     )
 
-    errores = [
-        r for r in resultado.get("addResults", [])
-        if not r.get("success")
-    ]
+    nuevos = []
+    actualizados = []
+    sin_cambios = 0
 
-    if errores:
-        raise RuntimeError(f"Errores al insertar: {errores}")
+    for identificador, entidad in entidades.items():
+        anterior = existentes.get(identificador)
 
-    if len(resultado.get("addResults", [])) != len(nuevos):
-        raise RuntimeError("Respuesta de inserción incompleta.")
+        if anterior is None:
+            nuevos.append(entidad)
+        elif hay_cambios(entidad["attributes"], anterior):
+            entidad["attributes"][id_objectid] = anterior[id_objectid]
+            actualizados.append(entidad)
+        else:
+            sin_cambios += 1
 
-    print("Sismos insertados:", len(nuevos))
+    print("Eventos obtenidos:", len(sismos))
+    print("Eventos únicos:", len(entidades))
+    print("Nuevos:", len(nuevos))
+    print("Por actualizar:", len(actualizados))
+    print("Sin cambios:", sin_cambios)
+
+    insertados = aplicar_lotes(token, nuevos, "adds")
+    modificados = aplicar_lotes(token, actualizados, "updates")
+
+    print("Insertados:", insertados)
+    print("Actualizados:", modificados)
+    print("Sin cambios:", sin_cambios)
     print("Sincronización finalizada correctamente.")
 
 
