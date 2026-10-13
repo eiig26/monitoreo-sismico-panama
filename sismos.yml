@@ -1,0 +1,46 @@
+
+name: Monitoreo Sismico Panama
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "2-59/5 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: monitoreo-sismico-panama
+  cancel-in-progress: false
+
+jobs:
+  consultar-sismos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    steps:
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependencias
+        run: pip install -r requirements.txt
+
+      - name: Consultar sismos
+        run: python sismos.py
+
+      - name: Probar conexion ArcGIS Online
+        env:
+          ARCGIS_CLIENT_ID: ${{ secrets.ARCGIS_CLIENT_ID }}
+          ARCGIS_CLIENT_SECRET: ${{ secrets.ARCGIS_CLIENT_SECRET }}
+        run: python test_arcgis.py
+
+      - name: Sincronizar sismos con ArcGIS Online
+        env:
+          ARCGIS_CLIENT_ID: ${{ secrets.ARCGIS_CLIENT_ID }}
+          ARCGIS_CLIENT_SECRET: ${{ secrets.ARCGIS_CLIENT_SECRET }}
+        run: python sync_sismos.py
