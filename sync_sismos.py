@@ -223,27 +223,47 @@ def sincronizar():
     campos = {c["name"] for c in capa["fields"]}
     id_objectid = capa["objectIdField"]
 
+    
     entidades = {}
+    ids_conflictivos = set()
+    duplicados_identicos = 0
 
     for sismo in sismos:
         entidad = preparar_entidad(sismo)
         identificador = entidad["attributes"]["id_evento"]
 
-        if identificador in entidades:
-            if entidad["attributes"] != entidades[identificador]["attributes"]:
-                # fecha_actualizacion varía, por eso
-                # la excluimos de esta comparación
-                actual = entidad["attributes"].copy()
-                previo = entidades[identificador]["attributes"].copy()
-                actual.pop("fecha_actualizacion", None)
-                previo.pop("fecha_actualizacion", None)
+        if identificador in ids_conflictivos:
+            continue
 
-                if actual != previo:
-                    raise RuntimeError(
-                        f"Registros distintos con mismo ID: {identificador}"
-                    )
+        if identificador in entidades:
+            actual = entidad["attributes"].copy()
+            previo = entidades[identificador]["attributes"].copy()
+
+            actual.pop("fecha_actualizacion", None)
+            previo.pop("fecha_actualizacion", None)
+
+            if actual == previo:
+                duplicados_identicos += 1
+                continue
+
+            # Dos registros diferentes comparten ID.
+            # No elegir uno arbitrariamente.
+            ids_conflictivos.add(identificador)
+            del entidades[identificador]
+            continue
 
         entidades[identificador] = entidad
+
+    print("Duplicados idénticos:", duplicados_identicos)
+    print("IDs ambiguos pendientes:", len(ids_conflictivos))
+
+    for identificador in sorted(ids_conflictivos):
+        print("ADVERTENCIA - ID ambiguo:", identificador)
+
+    if not entidades:
+        raise RuntimeError(
+            "No hay eventos seguros para sincronizar."
+        )
 
     requeridos = set(
         next(iter(entidades.values()))["attributes"]
